@@ -186,7 +186,7 @@ class UpdateService {
                         try {
                           OtaUpdate()
                               .execute(downloadUrl,
-                                  destinationFilename: 'CetakNota.apk')
+                                  destinationFilename: 'CetakNotaBT.apk')
                               .listen((OtaEvent event) {
                             setDialogState(() {
                               switch (event.status) {
