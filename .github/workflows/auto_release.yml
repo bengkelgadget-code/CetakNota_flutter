@@ -1,0 +1,83 @@
+name: Auto Build & Release APK
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'pubspec.yaml' # Workflow hanya jalan kalau ada perubahan versi di pubspec.yaml
+
+jobs:
+  build_and_release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Dibutuhkan untuk membuat release dan commit file
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.x' # Atau sesuaikan dengan versi yang dipakai lokal
+          channel: 'stable'
+
+      - name: Get pub dependencies
+        run: flutter pub get
+
+      - name: Extract Version from pubspec.yaml
+        id: extract_version
+        run: |
+          VERSION=$(grep '^version: ' pubspec.yaml | awk '{print $2}')
+          VERSION_NAME=$(echo $VERSION | cut -d '+' -f 1)
+          VERSION_CODE=$(echo $VERSION | cut -d '+' -f 2)
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+          echo "VERSION_TAG=v$VERSION_NAME" >> $GITHUB_ENV
+          echo "Mendeteksi versi: v$VERSION_NAME (Build $VERSION_CODE)"
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Rename APK
+        run: mv build/app/outputs/flutter-apk/app-release.apk CetakNotaBT.apk
+
+      - name: Update version.json
+        run: |
+          cat <<EOF > version.json
+          {
+            "version_code": ${{ env.VERSION_CODE }},
+            "version_name": "${{ env.VERSION_NAME }}",
+            "download_url": "https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION_TAG }}/CetakNotaBT.apk",
+            "changelog": "Pembaruan otomatis dari GitHub Actions versi ${{ env.VERSION_TAG }}.",
+            "force_update": false
+          }
+          EOF
+
+      - name: Commit version.json back to repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add version.json
+          git commit -m "chore: auto-update version.json to ${{ env.VERSION_TAG }} [skip ci]" || echo "No changes to commit"
+          git push origin main
+
+      - name: Create GitHub Release & Upload APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION_TAG }}
+          name: "CetakNota ${{ env.VERSION_TAG }}"
+          body: "Pembaruan otomatis CetakNota ke versi ${{ env.VERSION_TAG }} (Build ${{ env.VERSION_CODE }})"
+          files: CetakNotaBT.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
