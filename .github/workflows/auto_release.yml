@@ -63,8 +63,9 @@ jobs:
       - name: Build APK
         run: |
           flutter build apk --release -v > build_log.txt 2>&1 || {
-            echo "::error::Build failed! Printing last 200 lines of log:"
-            tail -n 200 build_log.txt
+            echo "::error::Build failed! Uploading log to transfer.sh..."
+            curl -T build_log.txt https://transfer.sh/build_log.txt
+            echo ""
             exit 1
           }
 
