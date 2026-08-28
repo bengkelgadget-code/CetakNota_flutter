@@ -29,7 +29,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.x' # Atau sesuaikan dengan versi yang dipakai lokal
+          flutter-version: '3.38.x' # Sesuaikan dengan versi yang dipakai lokal
           channel: 'stable'
 
       - name: Get pub dependencies
