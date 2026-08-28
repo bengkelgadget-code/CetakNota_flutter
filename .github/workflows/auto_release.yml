@@ -61,7 +61,12 @@ jobs:
           fi
 
       - name: Build APK
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release -v > build_log.txt 2>&1 || {
+            echo "::error::Build failed! Printing last 200 lines of log:"
+            tail -n 200 build_log.txt
+            exit 1
+          }
 
       - name: Rename APK
         run: mv build/app/outputs/flutter-apk/app-release.apk CetakNotaBT.apk
