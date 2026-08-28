@@ -63,11 +63,16 @@ jobs:
       - name: Build APK
         run: |
           flutter build apk --release -v > build_log.txt 2>&1 || {
-            echo "::error::Build failed! Uploading log to transfer.sh..."
-            curl -T build_log.txt https://transfer.sh/build_log.txt
-            echo ""
+            echo "::error::Build failed! Saving log as artifact..."
             exit 1
           }
+
+      - name: Upload Build Log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-build-log
+          path: build_log.txt
 
       - name: Rename APK
         run: mv build/app/outputs/flutter-apk/app-release.apk CetakNotaBT.apk
