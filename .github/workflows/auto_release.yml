@@ -46,6 +46,16 @@ jobs:
           echo "VERSION_TAG=v$VERSION_NAME" >> $GITHUB_ENV
           echo "Mendeteksi versi: v$VERSION_NAME (Build $VERSION_CODE)"
 
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/upload-keystore.jks
+          cat <<EOF > android/key.properties
+          storePassword=${{ secrets.STORE_PASSWORD }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          storeFile=upload-keystore.jks
+          EOF
+
       - name: Build APK
         run: flutter build apk --release
 
