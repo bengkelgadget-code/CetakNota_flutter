@@ -319,10 +319,20 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (path == null) throw Exception('File tidak ditemukan');
       
-      final isPdf = path.toLowerCase().endsWith('.pdf');
-      final mimeType = isPdf ? 'application/pdf' : 'image/jpeg';
-      
       final bytes = await File(path).readAsBytes();
+      
+      // Deteksi MIME type lebih akurat menggunakan magic bytes (header file)
+      bool isRealPdf = false;
+      if (bytes.length > 4) {
+        // %PDF
+        if (bytes[0] == 0x25 && bytes[1] == 0x50 && bytes[2] == 0x44 && bytes[3] == 0x46) {
+          isRealPdf = true;
+        }
+      }
+      
+      final isPdfExt = path.toLowerCase().endsWith('.pdf');
+      final mimeType = (isRealPdf || isPdfExt) ? 'application/pdf' : 'image/jpeg';
+      
       final base64Data = base64Encode(bytes);
       final result = await GeminiService.processReceipt(base64Data, type, apiKey, mimeType: mimeType);
       
