@@ -125,6 +125,12 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _checkAiStatus() async {
     final prefs = await SharedPreferences.getInstance();
     String? apiKey = prefs.getString('geminiApiKey');
+    
+    // Hapus API key lama yang bocor/diblokir jika masih tersimpan di cache HP
+    if (apiKey == 'AIzaSyBPc7DI4uxBi55_f5HMPaerOYjhxusclZg') {
+      apiKey = null; 
+    }
+
     if (apiKey == null || apiKey.trim().isEmpty) {
       apiKey = const String.fromEnvironment('GEMINI_API_KEY');
       await prefs.setString('geminiApiKey', apiKey);

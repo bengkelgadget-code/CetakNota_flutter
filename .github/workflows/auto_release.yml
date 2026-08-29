@@ -62,7 +62,7 @@ jobs:
 
       - name: Build APK
         run: |
-          flutter build apk --release -v > build_log.txt 2>&1 || {
+          flutter build apk --release --dart-define=GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }} -v > build_log.txt 2>&1 || {
             echo "::error::Build failed! Saving log as artifact..."
             exit 1
           }
