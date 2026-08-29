@@ -126,7 +126,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final prefs = await SharedPreferences.getInstance();
     String? apiKey = prefs.getString('geminiApiKey');
     if (apiKey == null || apiKey.trim().isEmpty) {
-      apiKey = 'AIzaSyBPc7DI4uxBi55_f5HMPaerOYjhxusclZg';
+      apiKey = const String.fromEnvironment('GEMINI_API_KEY');
       await prefs.setString('geminiApiKey', apiKey);
     }
     setState(() {
