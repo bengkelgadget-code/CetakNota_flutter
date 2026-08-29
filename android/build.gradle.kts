@@ -20,6 +20,16 @@ subprojects {
         if (project.plugins.hasPlugin("com.android.library")) {
             val androidExtension = project.extensions.findByName("android")
             if (androidExtension != null) {
+                // Force compileSdk to 36 to fix lStar missing resource errors in older plugins
+                try {
+                    val methods = androidExtension.javaClass.methods
+                    val setCompileSdkMethod = methods.find { it.name == "setCompileSdk" && it.parameterTypes.size == 1 } 
+                        ?: methods.find { it.name == "compileSdkVersion" && it.parameterTypes.size == 1 }
+                    setCompileSdkMethod?.invoke(androidExtension, 36)
+                } catch (e: Exception) {
+                    println("Failed to force compileSdk: ${e.message}")
+                }
+
                 val namespaceProp = androidExtension.javaClass.methods.find { it.name == "getNamespace" }
                 val namespaceValue = namespaceProp?.invoke(androidExtension)
                 if (namespaceValue == null) {
