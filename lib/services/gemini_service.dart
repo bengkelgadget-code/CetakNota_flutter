@@ -25,7 +25,7 @@ class GeminiService {
       ]
     };
 
-    final models = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.6-flash'];
+    final models = ['gemini-3.6-flash']; // Hanya gunakan model terbaru untuk mempercepat, hindari loop error
     String lastError = '';
     
     for (String model in models) {
@@ -71,3 +71,4 @@ class GeminiService {
     throw Exception(lastError);
   }
 }
+

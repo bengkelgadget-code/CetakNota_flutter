@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:blue_thermal_printer/blue_thermal_printer.dart';
 import 'package:intl/intl.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:io';
 import 'dart:async';
 import 'services/gemini_service.dart';
@@ -434,7 +436,21 @@ class _HomeScreenState extends State<HomeScreen> {
           ? 'application/pdf'
           : 'image/jpeg';
 
-      final base64Data = base64Encode(bytes);
+      Uint8List bytesToEncode = bytes;
+      if (mimeType != 'application/pdf') {
+        try {
+          bytesToEncode = await FlutterImageCompress.compressWithList(
+            bytes,
+            minWidth: 800,
+            minHeight: 800,
+            quality: 60,
+          );
+        } catch (e) {
+          print('Compression failed: $e');
+        }
+      }
+
+      final base64Data = base64Encode(bytesToEncode);
       final result = await GeminiService.processReceipt(
         base64Data,
         type,
@@ -1520,3 +1536,5 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 }
+
+
