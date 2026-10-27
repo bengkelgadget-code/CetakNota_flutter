@@ -104,11 +104,14 @@ class _PreviewScreenState extends State<PreviewScreen> {
       }
       
       if (isConnected != true) {
-        if (mounted) showCustomSnackBar(context, 'Printer belum terhubung! Silakan cek menu Pengaturan.', isError: true);
+        if (mounted) {
+          showCustomSnackBar(context, 'Printer belum terhubung! Silakan cek menu Pengaturan.', isError: true);
+        }
         return;
       }
     }
 
+    if (!mounted) return;
     showCustomSnackBar(context, 'Mencetak struk...', isSuccess: true);
     
     try {
@@ -116,16 +119,16 @@ class _PreviewScreenState extends State<PreviewScreen> {
       int admin = int.tryParse(widget.data['admin']?.toString().replaceAll(RegExp(r'[^0-9]'), '') ?? '0') ?? 0;
       int total = nominal + admin;
 
-      const String ESC = "\x1b";
-      const String GS = "\x1d";
-      const String INIT = "$ESC@";
-      const String alignCenter = "${ESC}a\x01";
-      const String alignLeft = "${ESC}a\x00";
-      const String boldOn = "${ESC}E\x01"; 
-      const String fontLarge = "$GS!\x11"; 
-      const String fontNormal = "$GS!\x00";
+      const String esc = "\x1b";
+      const String gs = "\x1d";
+      const String init = "$esc@";
+      const String alignCenter = "${esc}a\x01";
+      const String alignLeft = "${esc}a\x00";
+      const String boldOn = "${esc}E\x01"; 
+      const String fontLarge = "$gs!\x11"; 
+      const String fontNormal = "$gs!\x00";
 
-      String raw = INIT + boldOn; 
+      String raw = init + boldOn; 
       
       if (widget.type == 'Transfer') {
         raw += "$alignCenter$fontLarge${shopName.toUpperCase()}$fontNormal\n\n";
@@ -280,7 +283,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
                 color: Colors.white,
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.grey.withOpacity(0.1),
+                    color: Colors.grey.withValues(alpha: 0.1),
                     blurRadius: 20,
                     spreadRadius: 5,
                   )
@@ -447,7 +450,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
         child: Container(
           padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
           decoration: BoxDecoration(
-            color: Colors.blue.withOpacity(0.1),
+            color: Colors.blue.withValues(alpha: 0.1),
             borderRadius: BorderRadius.circular(4),
           ),
           child: row,

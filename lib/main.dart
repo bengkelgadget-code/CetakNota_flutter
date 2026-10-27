@@ -59,12 +59,13 @@ class _MainNavigationState extends State<MainNavigation> {
             borderRadius: BorderRadius.circular(16),
           ),
           labelTextStyle: WidgetStateProperty.resolveWith((states) {
-            if (states.contains(WidgetState.selected))
+            if (states.contains(WidgetState.selected)) {
               return const TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.bold,
                 color: Colors.indigo,
               );
+            }
             return const TextStyle(fontSize: 11, color: Colors.grey);
           }),
         ),
@@ -167,6 +168,12 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  @override
+  void dispose() {
+    _intentDataStreamSubscription?.cancel();
+    super.dispose();
+  }
+
   StreamSubscription? _intentDataStreamSubscription;
 
   void _initShareIntent() {
@@ -176,7 +183,9 @@ class _HomeScreenState extends State<HomeScreen> {
           .getMediaStream()
           .listen(
             (List<SharedMediaFile> value) {
-              if (value.isNotEmpty) _handleSharedImage(value.first.path);
+              if (value.isNotEmpty) {
+                _handleSharedImage(value.first.path);
+              }
             },
             onError: (err) {
               debugPrint("getIntentDataStream error: $err");
@@ -185,16 +194,18 @@ class _HomeScreenState extends State<HomeScreen> {
       ReceiveSharingIntent.instance.getInitialMedia().then((
         List<SharedMediaFile>? value,
       ) {
-        if (value != null && value.isNotEmpty)
+        if (value != null && value.isNotEmpty) {
           _handleSharedImage(value.first.path);
+        }
         ReceiveSharingIntent.instance.reset();
       });
     } catch (e) {
-      print("Share intent error: $e");
+      debugPrint("Share intent error: $e");
     }
   }
 
   void _handleSharedImage(String path) {
+    ReceiveSharingIntent.instance.reset();
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -386,7 +397,6 @@ class _HomeScreenState extends State<HomeScreen> {
         List<PlatformFile>? files = await FilePicker.pickFiles(
           type: FileType.custom,
           allowedExtensions: ['pdf'],
-          allowMultiple: false,
         );
         if (files.isEmpty || files.first.path == null) return;
         path = files.first.path;
@@ -446,7 +456,7 @@ class _HomeScreenState extends State<HomeScreen> {
             quality: 60,
           );
         } catch (e) {
-          print('Compression failed: $e');
+          debugPrint('Compression failed: $e');
         }
       }
 
@@ -456,6 +466,13 @@ class _HomeScreenState extends State<HomeScreen> {
         type,
         apiKey,
         mimeType: mimeType,
+        onStatus: (status) {
+          if (mounted) {
+            setState(() {
+              _loadingText = status;
+            });
+          }
+        },
       );
 
       if (result == null) throw Exception('Gagal menganalisis struk');
@@ -467,9 +484,10 @@ class _HomeScreenState extends State<HomeScreen> {
       int parsedNominal = 0;
       if (nominal is int) {
         parsedNominal = nominal;
-      } else if (nominal is String)
+      } else if (nominal is String) {
         parsedNominal =
             int.tryParse(nominal.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+      }
 
       setState(() {
         _historyList.insert(0, {
@@ -619,8 +637,8 @@ class _HomeScreenState extends State<HomeScreen> {
                           boxShadow: [
                             BoxShadow(
                               color: _isAiConfigured
-                                  ? Colors.greenAccent.withOpacity(0.6)
-                                  : Colors.redAccent.withOpacity(0.6),
+                                  ? Colors.greenAccent.withValues(alpha: 0.6)
+                                  : Colors.redAccent.withValues(alpha: 0.6),
                               blurRadius: 10,
                               spreadRadius: 3,
                             ),
@@ -637,7 +655,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       borderRadius: BorderRadius.circular(16),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.grey.withOpacity(0.1),
+                          color: Colors.grey.withValues(alpha: 0.1),
                           blurRadius: 10,
                           offset: const Offset(0, 4),
                         ),
@@ -707,10 +725,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           )
                         : ListView(
-                            children: filteredList.asMap().entries.map((entry) {
-                              int index = entry.key;
-                              var item = entry.value;
-
+                            children: filteredList.map((item) {
                               int originalIndex = _historyList.indexOf(item);
 
                               return InkWell(
@@ -746,7 +761,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     borderRadius: BorderRadius.circular(16),
                                     boxShadow: [
                                       BoxShadow(
-                                        color: Colors.grey.withOpacity(0.1),
+                                        color: Colors.grey.withValues(alpha: 0.1),
                                         blurRadius: 10,
                                         offset: const Offset(0, 4),
                                       ),
@@ -857,7 +872,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             if (_isLoading)
               Container(
-                color: Colors.white.withOpacity(0.9),
+                color: Colors.white.withValues(alpha: 0.9),
                 child: Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -988,7 +1003,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         setState(() {});
       }
     } catch (e) {
-      print("Bluetooth init error: \$e");
+      debugPrint("Bluetooth init error: $e");
     }
   }
 
@@ -1005,12 +1020,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _connected = true;
             _isConnecting = false;
           });
-          if (showNotif)
+          if (showNotif) {
             showCustomSnackBar(
               context,
               'Printer sudah terhubung!',
               isSuccess: true,
             );
+          }
         }
         return;
       }
@@ -1025,12 +1041,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _connected = true;
           _isConnecting = false;
         });
-        if (showNotif)
+        if (showNotif) {
           showCustomSnackBar(
             context,
             'Printer berhasil terhubung!',
             isSuccess: true,
           );
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -1134,7 +1151,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   borderRadius: BorderRadius.circular(32),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.grey.withOpacity(0.1),
+                      color: Colors.grey.withValues(alpha: 0.1),
                       blurRadius: 20,
                       offset: const Offset(0, 10),
                     ),
@@ -1387,8 +1404,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                           decoration: BoxDecoration(
                             color: _apiKeyCtrl.text.isNotEmpty
-                                ? Colors.green.withOpacity(0.1)
-                                : Colors.red.withOpacity(0.1),
+                                ? Colors.green.withValues(alpha: 0.1)
+                                : Colors.red.withValues(alpha: 0.1),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
@@ -1433,8 +1450,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 TextButton(
                                   onPressed: () {
                                     setState(() {
-                                      if (tempCtrl.text.isNotEmpty)
+                                      if (tempCtrl.text.isNotEmpty) {
                                         _apiKeyCtrl.text = tempCtrl.text;
+                                      }
                                     });
                                     Navigator.pop(context);
                                   },
