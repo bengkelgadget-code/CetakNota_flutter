@@ -26,22 +26,18 @@ class GeminiService {
             }
           ]
         }
-      ],
-      "generationConfig": {
-        "responseMimeType": "application/json",
-        "temperature": 0.1,
-      }
+      ]
     };
 
-    // Daftar model aktif & stabil berurutan dari model terbaik hingga fallback darurat
+    // Daftar model aktif dan didukung akun
     final models = [
-      'gemini-3.8-flash',
+      'gemini-3.5-flash',
+      'gemini-3.6-flash',
       'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-1.5-flash',
+      'gemini-2.0-flash',
     ];
 
-    String lastError = '';
+    List<String> failedLogs = [];
 
     for (int i = 0; i < models.length; i++) {
       final model = models[i];
@@ -53,69 +49,79 @@ class GeminiService {
         'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey',
       );
 
-      http.Response response;
-      try {
-        response = await http
-            .post(
-              url,
-              headers: {'Content-Type': 'application/json'},
-              body: jsonEncode(body),
-            )
-            .timeout(const Duration(seconds: 30));
-      } catch (e) {
-        lastError = 'Koneksi ke Gemini ($model) gagal: $e';
-        continue; // coba model berikutnya jika timeout/jaringan terganggu
-      }
+      // Coba request dengan retry jika terkena rate limit (429)
+      for (int attempt = 0; attempt < 2; attempt++) {
+        http.Response response;
+        try {
+          response = await http
+              .post(
+                url,
+                headers: {'Content-Type': 'application/json'},
+                body: jsonEncode(body),
+              )
+              .timeout(const Duration(seconds: 30));
+        } catch (e) {
+          failedLogs.add('$model: Gagal koneksi ($e)');
+          break; // pindah ke model berikutnya jika timeout/jaringan
+        }
 
-      if (response.statusCode == 200) {
-        final jsonResponse = jsonDecode(response.body);
-        final String textResponse =
-            jsonResponse['candidates'][0]['content']['parts'][0]['text'];
+        if (response.statusCode == 200) {
+          final jsonResponse = jsonDecode(response.body);
+          final String textResponse =
+              jsonResponse['candidates'][0]['content']['parts'][0]['text'];
 
-        String cleanJson = textResponse;
-        if (textResponse.contains('```json')) {
-          cleanJson = textResponse.split('```json')[1].split('```')[0].trim();
-        } else if (textResponse.contains('```')) {
-          cleanJson = textResponse.split('```')[1].split('```')[0].trim();
-        } else {
-          int start = textResponse.indexOf('{');
-          int end = textResponse.lastIndexOf('}');
-          if (start != -1 && end != -1 && end > start) {
-            cleanJson = textResponse.substring(start, end + 1).trim();
+          String cleanJson = textResponse;
+          if (textResponse.contains('```json')) {
+            cleanJson = textResponse.split('```json')[1].split('```')[0].trim();
+          } else if (textResponse.contains('```')) {
+            cleanJson = textResponse.split('```')[1].split('```')[0].trim();
+          } else {
+            int start = textResponse.indexOf('{');
+            int end = textResponse.lastIndexOf('}');
+            if (start != -1 && end != -1 && end > start) {
+              cleanJson = textResponse.substring(start, end + 1).trim();
+            }
+          }
+
+          try {
+            return jsonDecode(cleanJson) as Map<String, dynamic>;
+          } catch (e) {
+            failedLogs.add('$model: Format JSON tidak sesuai ($e)');
+            break; // coba model lain
           }
         }
 
-        try {
-          return jsonDecode(cleanJson) as Map<String, dynamic>;
-        } catch (e) {
-          lastError = 'Format JSON salah dari $model: $textResponse';
-          continue; // coba model lain jika parsing gagal
+        // Jika masalah autentikasi atau API Key salah, langsung hentikan
+        if (response.statusCode == 400 || response.statusCode == 401 || response.statusCode == 403) {
+          try {
+            final errBody = jsonDecode(response.body);
+            final msg = errBody['error']?['message'] ?? response.body;
+            throw Exception('API Key Gemini ditolak ($msg). Periksa API Key di menu Pengaturan.');
+          } catch (e) {
+            if (e is Exception && e.toString().contains('API Key')) rethrow;
+            throw Exception('API Key Gemini tidak valid (Code: ${response.statusCode}). Periksa di Pengaturan.');
+          }
         }
-      }
 
-      // Jika masalah autentikasi atau API Key salah, langsung berhenti (tidak looping sia-sia)
-      if (response.statusCode == 400 || response.statusCode == 401 || response.statusCode == 403) {
-        try {
-          final errBody = jsonDecode(response.body);
-          final msg = errBody['error']?['message'] ?? response.body;
-          throw Exception('API Key Gemini ditolak ($msg). Periksa API Key di menu Pengaturan.');
-        } catch (e) {
-          if (e is Exception && e.toString().contains('API Key')) rethrow;
-          throw Exception('API Key Gemini tidak valid (Code: ${response.statusCode}). Periksa di Pengaturan.');
+        // Jika terkena Rate Limit (429) atau Server Sibuk (503), tunggu 2 detik lalu retry sekali
+        if (response.statusCode == 429 || response.statusCode == 503) {
+          if (attempt == 0) {
+            if (onStatus != null) {
+              onStatus('Server $model padat, mencoba ulang...');
+            }
+            await Future.delayed(const Duration(milliseconds: 2000));
+            continue; // coba lagi sekali di model yang sama
+          }
+          failedLogs.add('$model: Kuota/Rate limit penuh (Code: ${response.statusCode})');
+          break; // lanjut coba model cadangan berikutnya
         }
-      }
 
-      // Jika terkena Rate Limit (429) atau Server Overload (503), beri jeda singkat lalu lanjut ke fallback model
-      if (response.statusCode == 429 || response.statusCode == 503) {
-        lastError = 'Server Gemini ($model) penuh/mencapai kuota (Code: ${response.statusCode}).';
-        await Future.delayed(const Duration(milliseconds: 1200));
-        continue;
+        // Jika 404 (model tidak didukung), catat lalu coba model berikutnya
+        failedLogs.add('$model: Ditolak (Code: ${response.statusCode})');
+        break; // coba model berikutnya
       }
-
-      // Error lainnya (misal 404 model not found)
-      lastError = 'API Gemini ($model) menolak (Code: ${response.statusCode}). Detail: ${response.body}';
     }
 
-    throw Exception(lastError);
+    throw Exception(failedLogs.isNotEmpty ? failedLogs.join('\n') : 'Gagal memproses struk.');
   }
 }

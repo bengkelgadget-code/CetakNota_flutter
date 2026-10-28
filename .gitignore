@@ -47,3 +47,6 @@ app.*.map.json
 # Keystore secrets
 keystore*.txt
 test.txt
+
+# APK files
+*.apk
