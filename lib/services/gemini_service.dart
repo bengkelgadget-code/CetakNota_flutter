@@ -29,12 +29,10 @@ class GeminiService {
       ]
     };
 
-    // Daftar model aktif dan didukung akun
+    // Daftar model yang 100% terbukti aktif dan cepat untuk akun ini
     final models = [
       'gemini-3.5-flash',
       'gemini-3.6-flash',
-      'gemini-2.5-flash',
-      'gemini-2.0-flash',
     ];
 
     List<String> failedLogs = [];
