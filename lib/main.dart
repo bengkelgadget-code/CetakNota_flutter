@@ -446,6 +446,16 @@ class _HomeScreenState extends State<HomeScreen> {
           ? 'application/pdf'
           : 'image/jpeg';
 
+      if (mimeType == 'application/pdf') {
+        final pdfSizeKb = bytes.length / 1024;
+        debugPrint('PDF size: ${pdfSizeKb.toStringAsFixed(2)} KB');
+        if (bytes.length > 5 * 1024 * 1024) {
+          throw Exception(
+            'File PDF terlalu besar (>5 MB). Foto ulang struknya sebagai gambar saja.',
+          );
+        }
+      }
+
       Uint8List bytesToEncode = bytes;
       if (mimeType != 'application/pdf') {
         try {
@@ -510,7 +520,9 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (e) {
       if (mounted) {
-        showCustomSnackBar(context, e.toString(), isError: true);
+        final message =
+            e.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
+        showCustomSnackBar(context, message, isError: true);
       }
     } finally {
       if (mounted) {
