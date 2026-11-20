@@ -93,10 +93,8 @@ class GeminiService {
       "maxOutputTokens": 1024,
     };
 
-    if (thinkingLevel != null) {
-      generationConfig["thinkingConfig"] = {
-        "thinkingLevel": thinkingLevel,
-      };
+    if (thinkingLevel != null && thinkingLevel.isNotEmpty) {
+      generationConfig["thinkingConfig"] = {"thinkingLevel": thinkingLevel};
     }
 
     return {
@@ -105,10 +103,7 @@ class GeminiService {
           "parts": [
             {"text": prompt},
             {
-              "inline_data": {
-                "mime_type": mimeType,
-                "data": base64Data,
-              },
+              "inline_data": {"mime_type": mimeType, "data": base64Data},
             },
           ],
         },
@@ -147,7 +142,9 @@ class GeminiService {
 
     try {
       for (int i = 0; i < models.length; i++) {
-        if (stopwatch.elapsed >= effectiveTotalTimeout) {
+        final remainingTotalBeforeModel =
+            effectiveTotalTimeout - stopwatch.elapsed;
+        if (remainingTotalBeforeModel <= Duration.zero) {
           failedLogs.add(
             'Batas waktu total (${effectiveTotalTimeout.inSeconds} detik) terlampaui',
           );
@@ -156,7 +153,7 @@ class GeminiService {
 
         final model = models[i];
         final isMainModel = (i == 0);
-        final timeout =
+        final baseTimeout =
             isMainModel ? effectiveMainTimeout : effectiveFallbackTimeout;
         final maxAttempts = isMainModel ? 2 : 1;
 
@@ -178,13 +175,18 @@ class GeminiService {
           'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey',
         );
 
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-          if (stopwatch.elapsed >= effectiveTotalTimeout) {
+        int attempt = 0;
+        while (attempt < maxAttempts) {
+          final remainingTotal = effectiveTotalTimeout - stopwatch.elapsed;
+          if (remainingTotal <= Duration.zero) {
             failedLogs.add(
               '$model: Waktu habis sebelum percobaan ke-${attempt + 1}',
             );
             break;
           }
+
+          final effectiveTimeout =
+              baseTimeout < remainingTotal ? baseTimeout : remainingTotal;
 
           final body = buildRequestBody(
             prompt: prompt,
@@ -202,21 +204,59 @@ class GeminiService {
                   headers: {'Content-Type': 'application/json'},
                   body: jsonEncode(body),
                 )
-                .timeout(timeout);
+                .timeout(effectiveTimeout);
           } on TimeoutException {
-            failedLogs.add('$model: Timeout ${timeout.inSeconds} detik');
+            failedLogs.add(
+              '$model: Timeout ${effectiveTimeout.inSeconds} detik',
+            );
             break; // Timeout -> lanjut ke model berikutnya
           } catch (e) {
             failedLogs.add('$model: Gagal koneksi ($e)');
             break; // Network error -> lanjut ke model berikutnya
           }
 
+          // B-F3: Validasi struktur respons 200 secara aman tanpa masking error
           if (response.statusCode == 200) {
+            Map<String, dynamic> jsonResponse;
             try {
-              final jsonResponse = jsonDecode(response.body);
-              final String textResponse =
-                  jsonResponse['candidates'][0]['content']['parts'][0]['text'];
+              jsonResponse = jsonDecode(response.body) as Map<String, dynamic>;
+            } catch (e) {
+              failedLogs.add('$model: Gagal decode body JSON ($e)');
+              break;
+            }
 
+            final candidates = jsonResponse['candidates'] as List?;
+            if (candidates == null || candidates.isEmpty) {
+              final promptFeedback = jsonResponse['promptFeedback'];
+              final blockReason = promptFeedback?['blockReason'];
+              final reasonStr =
+                  blockReason != null ? ' (blockReason: $blockReason)' : '';
+              failedLogs.add('$model: Respons 200 tanpa candidates$reasonStr');
+              break;
+            }
+
+            final firstCandidate = candidates[0] as Map<String, dynamic>?;
+            final finishReason = firstCandidate?['finishReason'];
+            final parts = firstCandidate?['content']?['parts'] as List?;
+
+            if (parts == null || parts.isEmpty) {
+              final reasonStr =
+                  finishReason != null ? ' (finishReason: $finishReason)' : '';
+              failedLogs.add(
+                '$model: Respons 200 tanpa content parts$reasonStr',
+              );
+              break;
+            }
+
+            final textResponse = parts[0]['text'] as String?;
+            if (textResponse == null || textResponse.trim().isEmpty) {
+              final reasonStr =
+                  finishReason != null ? ' (finishReason: $finishReason)' : '';
+              failedLogs.add('$model: Respons 200 tanpa teks$reasonStr');
+              break;
+            }
+
+            try {
               String cleanJson = textResponse;
               if (textResponse.contains('```json')) {
                 cleanJson =
@@ -240,7 +280,7 @@ class GeminiService {
             }
           }
 
-          // Cek apakah 400 karena thinkingConfig ditolak server
+          // B-F1: Cek apakah 400 karena thinkingConfig ditolak server (tanpa menghabiskan jatah attempt)
           if (response.statusCode == 400 && includeThinking) {
             final bodyLower = response.body.toLowerCase();
             if (bodyLower.contains('thinkingconfig') ||
@@ -250,25 +290,55 @@ class GeminiService {
                 '$model: thinkingConfig ditolak, mencoba ulang tanpa thinkingConfig',
               );
               includeThinking = false;
-              // Ulangi request yang sama tanpa thinkingConfig
+              // Ulangi request ini tanpa thinkingConfig pada attempt yang sama
               continue;
             }
           }
 
-          // Auth error (400 / 401 / 403)
-          if (response.statusCode == 400 ||
-              response.statusCode == 401 ||
-              response.statusCode == 403) {
+          // B-F2: Cek 400 karena schema JSON ditolak server
+          if (response.statusCode == 400) {
+            final bodyLower = response.body.toLowerCase();
+            if (bodyLower.contains('schema') ||
+                bodyLower.contains('responsejsonschema') ||
+                bodyLower.contains('invalid argument') ||
+                bodyLower.contains('invalid_argument')) {
+              String detail = response.body;
+              try {
+                final errJson = jsonDecode(response.body);
+                detail = errJson['error']?['message'] ?? response.body;
+              } catch (_) {}
+              final errorMsg =
+                  'Schema JSON ditolak server ($detail). Periksa responseJsonSchema di GeminiService.';
+              failedLogs.add('$model: $errorMsg');
+              throw Exception(errorMsg);
+            }
+          }
+
+          // Auth error: 401, 403, atau 400 yang pesannya eksplisit menyebut API key / auth
+          if (response.statusCode == 401 || response.statusCode == 403) {
+            String msg = response.body;
             try {
               final errBody = jsonDecode(response.body);
-              final msg = errBody['error']?['message'] ?? response.body;
+              msg = errBody['error']?['message'] ?? response.body;
+            } catch (_) {}
+            throw Exception(
+              'API Key Gemini ditolak ($msg). Periksa API Key di menu Pengaturan.',
+            );
+          }
+
+          if (response.statusCode == 400) {
+            final bodyLower = response.body.toLowerCase();
+            if (bodyLower.contains('api key') ||
+                bodyLower.contains('apikey') ||
+                bodyLower.contains('auth') ||
+                bodyLower.contains('credential')) {
+              String msg = response.body;
+              try {
+                final errBody = jsonDecode(response.body);
+                msg = errBody['error']?['message'] ?? response.body;
+              } catch (_) {}
               throw Exception(
                 'API Key Gemini ditolak ($msg). Periksa API Key di menu Pengaturan.',
-              );
-            } catch (e) {
-              if (e is Exception && e.toString().contains('API Key')) rethrow;
-              throw Exception(
-                'API Key Gemini tidak valid (Code: ${response.statusCode}). Periksa di Pengaturan.',
               );
             }
           }
@@ -280,6 +350,7 @@ class GeminiService {
                 '$model: Server padat (Code: ${response.statusCode}), retry dalam ${effectiveRetryDelay.inSeconds} detik',
               );
               await Future.delayed(effectiveRetryDelay);
+              attempt++;
               continue; // retry 1x untuk model utama
             } else {
               failedLogs.add(

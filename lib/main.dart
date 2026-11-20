@@ -11,6 +11,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:io';
 import 'dart:async';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'services/gemini_service.dart';
 import 'services/update_service.dart';
 import 'screens/preview_screen.dart';
@@ -77,6 +78,13 @@ class _MainNavigationState extends State<MainNavigation> {
             setState(() {
               _currentIndex = index;
             });
+            if (index == 0) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) {
+                  UpdateService.showPendingUpdateDialog(context);
+                }
+              });
+            }
           },
           destinations: const [
             NavigationDestination(
@@ -121,7 +129,10 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadHistory();
     _initShareIntent();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      UpdateService.checkUpdate(context);
+      UpdateService.checkUpdate(
+        context,
+        isSafe: () => !_isLoading && (ModalRoute.of(context)?.isCurrent ?? true),
+      );
     });
   }
 
@@ -510,14 +521,15 @@ class _HomeScreenState extends State<HomeScreen> {
       });
       await _saveHistory();
 
-      if (mounted) {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => PreviewScreen(type: type, data: result),
-          ),
-        );
-      }
+      if (!mounted) return;
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => PreviewScreen(type: type, data: result),
+        ),
+      );
+      if (!mounted) return;
+      UpdateService.showPendingUpdateDialog(context);
     } catch (e) {
       if (mounted) {
         final message =
@@ -530,6 +542,28 @@ class _HomeScreenState extends State<HomeScreen> {
           _isLoading = false;
         });
       }
+    }
+  }
+
+  Future<void> _openHistoryItem(Map<String, dynamic> item) async {
+    if (item['data'] != null) {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => PreviewScreen(
+            type: item['type'],
+            data: Map<String, dynamic>.from(item['data']),
+          ),
+        ),
+      );
+      if (!mounted) return;
+      UpdateService.showPendingUpdateDialog(context);
+    } else {
+      showCustomSnackBar(
+        context,
+        'Data riwayat ini tidak lengkap (versi lama).',
+        isError: true,
+      );
     }
   }
 
@@ -741,27 +775,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               int originalIndex = _historyList.indexOf(item);
 
                               return InkWell(
-                                onTap: () {
-                                  if (item['data'] != null) {
-                                    Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (context) => PreviewScreen(
-                                          type: item['type'],
-                                          data: Map<String, dynamic>.from(
-                                            item['data'],
-                                          ),
-                                        ),
-                                      ),
-                                    );
-                                  } else {
-                                    showCustomSnackBar(
-                                      context,
-                                      'Data riwayat ini tidak lengkap (versi lama).',
-                                      isError: true,
-                                    );
-                                  }
-                                },
+                                onTap: () => _openHistoryItem(item),
                                 child: Container(
                                   margin: const EdgeInsets.only(bottom: 8),
                                   padding: const EdgeInsets.symmetric(
@@ -923,6 +937,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _shopNameCtrl = TextEditingController();
   final _shopAddressCtrl = TextEditingController();
   final _apiKeyCtrl = TextEditingController();
+  String _installedVersionInfo = '';
 
   List<Map<String, String>> _senderAccounts = [];
 
@@ -955,6 +970,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             .toList();
       }
     });
+
+    try {
+      final pkgInfo = await PackageInfo.fromPlatform();
+      if (mounted) {
+        setState(() {
+          _installedVersionInfo =
+              'Versi terpasang: v${pkgInfo.version} (build ${pkgInfo.buildNumber})';
+        });
+      }
+    } catch (_) {}
   }
 
   Future<void> _saveSettings() async {
@@ -1511,6 +1536,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ),
                     const SizedBox(height: 16),
+                    if (_installedVersionInfo.isNotEmpty) ...[
+                      Center(
+                        child: Text(
+                          _installedVersionInfo,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade600,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton.icon(

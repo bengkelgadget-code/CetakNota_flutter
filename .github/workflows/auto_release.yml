@@ -35,6 +35,12 @@ jobs:
       - name: Get pub dependencies
         run: flutter pub get
 
+      - name: Run Flutter Analyze
+        run: flutter analyze
+
+      - name: Run Flutter Tests
+        run: flutter test
+
       - name: Extract Version from pubspec.yaml
         id: extract_version
         run: |
@@ -46,28 +52,61 @@ jobs:
           echo "VERSION_TAG=v$VERSION_NAME" >> $GITHUB_ENV
           echo "Mendeteksi versi: v$VERSION_NAME (Build $VERSION_CODE)"
 
-      - name: Decode Keystore
+      - name: Validate Version Code Increase
         run: |
-          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/upload-keystore.jks
-            cat <<EOF > android/key.properties
-            storePassword=${{ secrets.STORE_PASSWORD }}
-            keyPassword=${{ secrets.KEY_PASSWORD }}
-            keyAlias=${{ secrets.KEY_ALIAS }}
-            storeFile=upload-keystore.jks
-          EOF
-          else
-            echo "KEYSTORE_BASE64 secret is not set, skipping keystore setup."
+          PREV_CODE=$(git show HEAD~1:version.json 2>/dev/null | jq -r '.version_code // 0' 2>/dev/null || echo "0")
+          if [ -z "$PREV_CODE" ] || [ "$PREV_CODE" = "null" ]; then
+            PREV_CODE=0
+          fi
+          echo "Version code sebelumnya: $PREV_CODE, Version code baru: $VERSION_CODE"
+          if [ "$VERSION_CODE" -le "$PREV_CODE" ]; then
+            echo "::error::version_code ($VERSION_CODE) harus lebih besar dari rilis sebelumnya ($PREV_CODE)!"
+            exit 1
           fi
 
-      - name: Build APK
+      - name: Validate Keystore Secrets
         run: |
-          flutter build apk --release --dart-define=GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }} -v > build_log.txt 2>&1 || {
-            echo "::error::Build failed! Saving log as artifact..."
+          if [ -z "${{ secrets.KEYSTORE_BASE64 }}" ] || [ -z "${{ secrets.STORE_PASSWORD }}" ] || [ -z "${{ secrets.KEY_PASSWORD }}" ] || [ -z "${{ secrets.KEY_ALIAS }}" ]; then
+            echo "::error::Secrets keystore (KEYSTORE_BASE64, STORE_PASSWORD, KEY_PASSWORD, KEY_ALIAS) wajib diisi untuk menandatangani APK release!"
             exit 1
-          }
+          fi
 
-      - name: Upload Build Log
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/upload-keystore.jks
+          cat <<EOF > android/key.properties
+          storePassword=${{ secrets.STORE_PASSWORD }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          storeFile=upload-keystore.jks
+          EOF
+
+      - name: Build APK (Retry up to 3x)
+        run: |
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          SUCCESS=0
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "=== Memulai build APK (Percobaan $RETRY_COUNT/$MAX_RETRIES) ==="
+            if flutter build apk --release --dart-define=GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }} -v > build_log.txt 2>&1; then
+              echo "Build APK berhasil pada percobaan ke-$RETRY_COUNT!"
+              SUCCESS=1
+              break
+            else
+              echo "Build APK gagal pada percobaan ke-$RETRY_COUNT."
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                echo "Menunggu 60 detik sebelum mencoba lagi..."
+                sleep 60
+              fi
+            fi
+          done
+          if [ $SUCCESS -ne 1 ]; then
+            echo "::error::Build APK gagal setelah $MAX_RETRIES percobaan!"
+            exit 1
+          fi
+
+      - name: Upload Build Log on Failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -79,15 +118,30 @@ jobs:
 
       - name: Update version.json
         run: |
-          cat <<EOF > version.json
-          {
-            "version_code": ${{ env.VERSION_CODE }},
-            "version_name": "${{ env.VERSION_NAME }}",
-            "download_url": "https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION_TAG }}/CetakNotaBT.apk",
-            "changelog": "Pembaruan otomatis dari GitHub Actions versi ${{ env.VERSION_TAG }}.",
-            "force_update": false
-          }
-          EOF
+          APK_SIZE=$(wc -c < CetakNotaBT.apk | tr -d ' ')
+          APK_CHECKSUM=$(sha256sum CetakNotaBT.apk | awk '{print $1}')
+          EXISTING_CHANGELOG=$(jq -r '.changelog // "Pembaruan fitur & perbaikan bug."' version.json 2>/dev/null || echo "Pembaruan fitur & perbaikan bug.")
+          EXISTING_FORCE_UPDATE=$(jq -r '.force_update // false' version.json 2>/dev/null || echo "false")
+
+          echo "Menyusun version.json dengan ukuran $APK_SIZE bytes dan SHA-256 $APK_CHECKSUM..."
+          jq -n \
+            --arg vc "$VERSION_CODE" \
+            --arg vn "$VERSION_NAME" \
+            --arg url "https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION_TAG }}/CetakNotaBT.apk" \
+            --arg cl "$EXISTING_CHANGELOG" \
+            --argjson fu "$EXISTING_FORCE_UPDATE" \
+            --arg cs "$APK_CHECKSUM" \
+            --argjson size "$APK_SIZE" \
+            '{
+              version_code: ($vc | tonumber),
+              version_name: $vn,
+              download_url: $url,
+              changelog: $cl,
+              force_update: $fu,
+              apk_checksum: $cs,
+              apk_size_bytes: $size
+            }' > version.json
+          cat version.json
 
       - name: Commit version.json back to repository
         run: |
