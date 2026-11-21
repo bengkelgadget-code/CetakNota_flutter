@@ -938,6 +938,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _shopAddressCtrl = TextEditingController();
   final _apiKeyCtrl = TextEditingController();
   String _installedVersionInfo = '';
+  bool _autoDownloadUpdate = true;
 
   List<Map<String, String>> _senderAccounts = [];
 
@@ -969,6 +970,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             .map((e) => Map<String, String>.from(e))
             .toList();
       }
+      _autoDownloadUpdate = prefs.getBool('autoDownloadUpdate') ?? true;
     });
 
     try {
@@ -1549,6 +1551,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                       const SizedBox(height: 8),
                     ],
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text(
+                        'Unduh update otomatis',
+                        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: const Text(
+                        'Otomatis unduh di background saat ada rilis baru',
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                      activeThumbColor: Colors.indigo,
+                      value: _autoDownloadUpdate,
+                      onChanged: (val) async {
+                        setState(() {
+                          _autoDownloadUpdate = val;
+                        });
+                        final prefs = await SharedPreferences.getInstance();
+                        await prefs.setBool('autoDownloadUpdate', val);
+                      },
+                    ),
+                    const SizedBox(height: 8),
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton.icon(

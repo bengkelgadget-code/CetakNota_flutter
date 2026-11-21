@@ -1,9 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:ota_update/ota_update.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 enum UpdateStatus {
@@ -26,6 +32,7 @@ class UpdateInfo {
   final String? apkChecksum;
   final double progress;
   final String? errorMessage;
+  final String? localApkPath;
 
   const UpdateInfo({
     this.status = UpdateStatus.none,
@@ -38,6 +45,7 @@ class UpdateInfo {
     this.apkChecksum,
     this.progress = 0.0,
     this.errorMessage,
+    this.localApkPath,
   });
 
   UpdateInfo copyWith({
@@ -51,6 +59,7 @@ class UpdateInfo {
     String? apkChecksum,
     double? progress,
     String? errorMessage,
+    String? localApkPath,
   }) {
     return UpdateInfo(
       status: status ?? this.status,
@@ -63,6 +72,7 @@ class UpdateInfo {
       apkChecksum: apkChecksum ?? this.apkChecksum,
       progress: progress ?? this.progress,
       errorMessage: errorMessage ?? this.errorMessage,
+      localApkPath: localApkPath ?? this.localApkPath,
     );
   }
 }
@@ -73,9 +83,167 @@ class UpdateService {
 
   static UpdateInfo currentUpdateInfo = const UpdateInfo();
   static UpdateInfo? pendingUpdateInfo;
+  static bool isDownloadingInProgress = false;
+  static Future<bool>? activeDownloadFuture;
+  static Future<Directory> Function()? defaultTempDirProvider;
+
+  static const MethodChannel _installerChannel =
+      MethodChannel('com.cetaknota.app/installer');
+
+  /// Helper mendapatkan direktori temporary/cache dengan fallback
+  static Future<Directory> _getTempDirectory(
+      Future<Directory> Function()? override) async {
+    if (override != null) return await override();
+    if (defaultTempDirProvider != null) return await defaultTempDirProvider!();
+    try {
+      return await getTemporaryDirectory();
+    } catch (_) {
+      return Directory.systemTemp;
+    }
+  }
+
+  /// Hitung SHA-256 dari file lokal secara streaming
+  static Future<String> _computeFileSha256(String filePath) async {
+    final file = File(filePath);
+    final digest = await sha256.bind(file.openRead()).first;
+    return digest.toString();
+  }
+
+  /// Pemicu instalasi file APK lokal ke sistem Android
+  static Future<bool> triggerInstall(
+    String filePath, {
+    Future<bool> Function(String)? installer,
+  }) async {
+    if (installer != null) {
+      return await installer(filePath);
+    }
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final res = await _installerChannel.invokeMethod<bool>(
+          'installApk',
+          {'filePath': filePath},
+        );
+        return res ?? false;
+      } catch (e) {
+        debugPrint('Error triggering installer: $e');
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /// Unduh APK di latar belakang dengan progress & verifikasi SHA-256
+  static Future<bool> downloadApkBackground({
+    required UpdateInfo updateInfo,
+    http.Client? client,
+    void Function(double progress)? onProgress,
+    Future<Directory> Function()? tempDirProvider,
+    Future<String> Function(String)? sha256Calculator,
+  }) async {
+    isDownloadingInProgress = true;
+    final httpClient = client ?? http.Client();
+    final shouldCloseClient = client == null;
+
+    final tempDir = await _getTempDirectory(tempDirProvider);
+
+    final targetFile =
+        File('${tempDir.path}/CetakNotaBT_v${updateInfo.versionCode}.apk');
+    final partFile =
+        File('${tempDir.path}/CetakNotaBT_v${updateInfo.versionCode}.part');
+
+    // Hapus file part sebelumnya jika ada
+    if (partFile.existsSync()) {
+      try {
+        partFile.deleteSync();
+      } catch (_) {}
+    }
+
+    try {
+      final request = http.Request('GET', Uri.parse(updateInfo.downloadUrl));
+      request.headers['Cache-Control'] = 'no-cache';
+      final response = await httpClient.send(request);
+
+      if (response.statusCode != 200) {
+        throw Exception('Server mengembalikan status ${response.statusCode}');
+      }
+
+      final totalBytes =
+          response.contentLength ?? updateInfo.apkSizeBytes ?? 0;
+      int receivedBytes = 0;
+      final bytes = <int>[];
+
+      await for (final chunk in response.stream) {
+        bytes.addAll(chunk);
+        receivedBytes += chunk.length;
+        if (totalBytes > 0) {
+          final p = (receivedBytes / totalBytes) * 100;
+          currentUpdateInfo = currentUpdateInfo.copyWith(
+            status: UpdateStatus.downloading,
+            progress: p,
+          );
+          if (onProgress != null) onProgress(p);
+        }
+      }
+
+      partFile.writeAsBytesSync(bytes);
+
+      // Verifikasi SHA-256 Checksum
+      if (updateInfo.apkChecksum != null &&
+          updateInfo.apkChecksum!.trim().isNotEmpty) {
+        final calcFn = sha256Calculator ?? _computeFileSha256;
+        final computedChecksum = await calcFn(partFile.path);
+
+        if (computedChecksum.toLowerCase() !=
+            updateInfo.apkChecksum!.toLowerCase()) {
+          // Checksum gagal: hapus file corrupt dan laporkan error
+          if (partFile.existsSync()) {
+            try {
+              partFile.deleteSync();
+            } catch (_) {}
+          }
+          currentUpdateInfo = currentUpdateInfo.copyWith(
+            status: UpdateStatus.error,
+            errorMessage:
+                'File update rusak (checksum tidak cocok), coba lagi.',
+          );
+          return false;
+        }
+      }
+
+      // Rename .part ke file final target
+      if (targetFile.existsSync()) {
+        try {
+          targetFile.deleteSync();
+        } catch (_) {}
+      }
+      partFile.renameSync(targetFile.path);
+
+      currentUpdateInfo = currentUpdateInfo.copyWith(
+        status: UpdateStatus.ready,
+        progress: 100.0,
+        localApkPath: targetFile.path,
+      );
+      return true;
+    } catch (e) {
+      if (partFile.existsSync()) {
+        try {
+          partFile.deleteSync();
+        } catch (_) {}
+      }
+      currentUpdateInfo = currentUpdateInfo.copyWith(
+        status: UpdateStatus.error,
+        errorMessage: e.toString(),
+      );
+      return false;
+    } finally {
+      isDownloadingInProgress = false;
+      if (shouldCloseClient) {
+        httpClient.close();
+      }
+    }
+  }
 
   /// Cek pembaruan aplikasi.
-  /// Mendukung inject client & version reader untuk unit test.
   static Future<UpdateInfo> checkUpdate(
     BuildContext context, {
     bool showNoUpdateToast = false,
@@ -85,14 +253,19 @@ class UpdateService {
     Future<String> Function()? getInstalledVersionName,
     SharedPreferences? testPrefs,
     String? customUrl,
+    Future<Directory> Function()? tempDirProvider,
+    Future<String> Function(String)? sha256Calculator,
+    Future<bool> Function(String)? installer,
   }) async {
-    currentUpdateInfo = currentUpdateInfo.copyWith(status: UpdateStatus.checking);
+    currentUpdateInfo =
+        currentUpdateInfo.copyWith(status: UpdateStatus.checking);
     final httpClient = client ?? http.Client();
     final shouldCloseClient = client == null;
 
     try {
       final targetUrl = customUrl ?? versionJsonUrl;
-      final uri = Uri.parse('$targetUrl?t=${DateTime.now().millisecondsSinceEpoch}');
+      final uri =
+          Uri.parse('$targetUrl?t=${DateTime.now().millisecondsSinceEpoch}');
 
       final response = await httpClient.get(
         uri,
@@ -143,44 +316,196 @@ class UpdateService {
       }
 
       if (serverVersionCode > currentBuildNumber && downloadUrl.isNotEmpty) {
-        currentUpdateInfo = UpdateInfo(
-          status: UpdateStatus.available,
-          versionCode: serverVersionCode,
-          versionName: serverVersionName,
-          downloadUrl: downloadUrl,
-          changelog: changelog,
-          forceUpdate: forceUpdate,
-          apkSizeBytes: apkSizeBytes,
-          apkChecksum: apkChecksum,
-        );
+        final prefs = testPrefs ?? await SharedPreferences.getInstance();
+        final bool autoDownload =
+            prefs.getBool('autoDownloadUpdate') ?? true;
+
+        final tempDir = await _getTempDirectory(tempDirProvider);
+
+        // Bersihkan file update versi lama di direktori temp
+        try {
+          final entities = tempDir.listSync();
+          for (final entity in entities) {
+            if (entity is File) {
+              final name = entity.uri.pathSegments.last;
+              if (name.startsWith('CetakNotaBT_') &&
+                  !name.contains('v$serverVersionCode')) {
+                try {
+                  entity.deleteSync();
+                } catch (_) {}
+              }
+            }
+          }
+        } catch (_) {}
+
+        final targetFile =
+            File('${tempDir.path}/CetakNotaBT_v$serverVersionCode.apk');
+        bool hasReadyFile = false;
+
+        if (targetFile.existsSync()) {
+          if (apkChecksum != null && apkChecksum.isNotEmpty) {
+            final calcFn = sha256Calculator ?? _computeFileSha256;
+            final hash = await calcFn(targetFile.path);
+            if (hash.toLowerCase() == apkChecksum.toLowerCase()) {
+              hasReadyFile = true;
+            } else {
+              try {
+                targetFile.deleteSync();
+              } catch (_) {}
+            }
+          } else {
+            hasReadyFile = true;
+          }
+        }
 
         final safeToApply = isSafe == null || isSafe();
 
-        if (safeToApply) {
-          pendingUpdateInfo = null;
-          if (context.mounted) {
-            _showUpdateDialog(
-              context,
-              updateInfo: currentUpdateInfo,
-              testPrefs: testPrefs,
-            );
+        if (hasReadyFile) {
+          // File update sudah tersedia & terverifikasi
+          currentUpdateInfo = UpdateInfo(
+            status: UpdateStatus.ready,
+            versionCode: serverVersionCode,
+            versionName: serverVersionName,
+            downloadUrl: downloadUrl,
+            changelog: changelog,
+            forceUpdate: forceUpdate,
+            apkSizeBytes: apkSizeBytes,
+            apkChecksum: apkChecksum,
+            progress: 100.0,
+            localApkPath: targetFile.path,
+          );
+
+          if (safeToApply) {
+            pendingUpdateInfo = null;
+            if (context.mounted) {
+              unawaited(_showUpdateDialog(
+                context,
+                updateInfo: currentUpdateInfo,
+                testPrefs: testPrefs,
+                installer: installer,
+              ));
+            }
+          } else {
+            pendingUpdateInfo = currentUpdateInfo;
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'Pembaruan v$serverVersionName siap dipasang — akan ditawarkan di Beranda',
+                  ),
+                  duration: const Duration(seconds: 4),
+                ),
+              );
+            }
+          }
+        } else if (forceUpdate || !autoDownload) {
+          // Force update atau auto-download dinonaktifkan: tampilkan dialog biasa
+          currentUpdateInfo = UpdateInfo(
+            status: UpdateStatus.available,
+            versionCode: serverVersionCode,
+            versionName: serverVersionName,
+            downloadUrl: downloadUrl,
+            changelog: changelog,
+            forceUpdate: forceUpdate,
+            apkSizeBytes: apkSizeBytes,
+            apkChecksum: apkChecksum,
+          );
+
+          if (safeToApply) {
+            pendingUpdateInfo = null;
+            if (context.mounted) {
+              unawaited(_showUpdateDialog(
+                context,
+                updateInfo: currentUpdateInfo,
+                testPrefs: testPrefs,
+                installer: installer,
+              ));
+            }
+          } else {
+            pendingUpdateInfo = currentUpdateInfo;
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'Pembaruan v$serverVersionName tersedia — akan ditawarkan di Beranda',
+                  ),
+                  duration: const Duration(seconds: 4),
+                ),
+              );
+            }
           }
         } else {
-          // Pola Buku Konter: Simpan pending dan tampilkan toast singkat 4 detik
-          pendingUpdateInfo = currentUpdateInfo;
+          // Auto-download di background (Pola Buku Konter)
+          currentUpdateInfo = UpdateInfo(
+            status: UpdateStatus.downloading,
+            versionCode: serverVersionCode,
+            versionName: serverVersionName,
+            downloadUrl: downloadUrl,
+            changelog: changelog,
+            forceUpdate: false,
+            apkSizeBytes: apkSizeBytes,
+            apkChecksum: apkChecksum,
+          );
+
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(
-                  'Pembaruan v$serverVersionName tersedia — akan ditawarkan di Beranda',
+                  'Mengunduh pembaruan v$serverVersionName di latar belakang...',
                 ),
                 duration: const Duration(seconds: 4),
               ),
             );
           }
+
+          // Jalankan proses unduh background
+          final downloadFuture = downloadApkBackground(
+            updateInfo: currentUpdateInfo,
+            client: client,
+            tempDirProvider: tempDirProvider,
+            sha256Calculator: sha256Calculator,
+          );
+          activeDownloadFuture = downloadFuture;
+          downloadFuture.then((success) async {
+            if (success) {
+              final safeNow = isSafe == null || isSafe();
+              if (safeNow && context.mounted) {
+                pendingUpdateInfo = null;
+                unawaited(_showUpdateDialog(
+                  context,
+                  updateInfo: currentUpdateInfo,
+                  testPrefs: testPrefs,
+                  installer: installer,
+                ));
+              } else {
+                pendingUpdateInfo = currentUpdateInfo;
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        'Pembaruan v$serverVersionName siap dipasang — akan ditawarkan di Beranda',
+                      ),
+                      duration: const Duration(seconds: 4),
+                    ),
+                  );
+                }
+              }
+            } else {
+              if (context.mounted &&
+                  currentUpdateInfo.errorMessage != null) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(currentUpdateInfo.errorMessage!),
+                    backgroundColor: Colors.red,
+                  ),
+                );
+              }
+            }
+          });
         }
       } else {
-        currentUpdateInfo = currentUpdateInfo.copyWith(status: UpdateStatus.none);
+        currentUpdateInfo =
+            currentUpdateInfo.copyWith(status: UpdateStatus.none);
         pendingUpdateInfo = null;
         if (showNoUpdateToast && context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -212,58 +537,60 @@ class UpdateService {
   }
 
   /// Tampilkan dialog update yang tertunda saat user kembali ke halaman Home
-  static void showPendingUpdateDialog(BuildContext context) {
+  static void showPendingUpdateDialog(
+    BuildContext context, {
+    SharedPreferences? testPrefs,
+    Future<bool> Function(String)? installer,
+  }) {
     if (pendingUpdateInfo != null && context.mounted) {
       final info = pendingUpdateInfo!;
       pendingUpdateInfo = null;
-      _showUpdateDialog(context, updateInfo: info);
+      _showUpdateDialog(
+        context,
+        updateInfo: info,
+        testPrefs: testPrefs,
+        installer: installer,
+      );
     }
   }
 
-  static void _showUpdateDialog(
+  static Future<void> _showUpdateDialog(
     BuildContext context, {
     required UpdateInfo updateInfo,
     SharedPreferences? testPrefs,
-  }) {
-    showDialog(
+    Future<bool> Function(String)? installer,
+  }) async {
+    // G-3: Muat preferensi hidePlayProtectNotice SEKALI di luar builder
+    final prefs = testPrefs ?? await SharedPreferences.getInstance();
+    final bool initialNoticeHidden =
+        prefs.getBool('hidePlayProtectNotice') ?? false;
+
+    if (!context.mounted) return;
+
+    await showDialog(
       context: context,
       barrierDismissible: !updateInfo.forceUpdate,
-      builder: (ctx) {
-        double progress = 0;
-        bool isDownloading = false;
-        String statusText = '';
-        String errorMsg = '';
-        bool hideNoticeChecked = false;
-        bool noticeHidden = false;
+      builder: (dialogContext) {
+        double progress = updateInfo.progress;
+        bool isDownloading = updateInfo.status == UpdateStatus.downloading;
+        bool isReady = updateInfo.status == UpdateStatus.ready;
+        String statusText = isReady ? 'Pembaruan siap dipasang' : '';
+        String errorMsg = updateInfo.errorMessage ?? '';
+        bool hideNoticeChecked = initialNoticeHidden;
+        bool noticeHidden = initialNoticeHidden;
+
+        final formattedSize = (updateInfo.apkSizeBytes != null &&
+                updateInfo.apkSizeBytes! > 0)
+            ? '${(updateInfo.apkSizeBytes! / (1024 * 1024)).toStringAsFixed(1)} MB'
+            : null;
+
+        final shortChecksum = (updateInfo.apkChecksum != null &&
+                updateInfo.apkChecksum!.isNotEmpty)
+            ? 'SHA-256: ${updateInfo.apkChecksum!.substring(0, min(8, updateInfo.apkChecksum!.length))}…'
+            : null;
 
         return StatefulBuilder(
-          builder: (dialogContext, setDialogState) {
-            // Muat status hidePlayProtectNotice
-            if (!isDownloading && statusText.isEmpty) {
-              if (testPrefs != null) {
-                noticeHidden = testPrefs.getBool('hidePlayProtectNotice') ?? false;
-              } else {
-                SharedPreferences.getInstance().then((prefs) {
-                  final hidden = prefs.getBool('hidePlayProtectNotice') ?? false;
-                  if (hidden != noticeHidden) {
-                    setDialogState(() {
-                      noticeHidden = hidden;
-                    });
-                  }
-                });
-              }
-            }
-
-            final formattedSize = (updateInfo.apkSizeBytes != null &&
-                    updateInfo.apkSizeBytes! > 0)
-                ? '${(updateInfo.apkSizeBytes! / (1024 * 1024)).toStringAsFixed(1)} MB'
-                : null;
-
-            final shortChecksum = (updateInfo.apkChecksum != null &&
-                    updateInfo.apkChecksum!.isNotEmpty)
-                ? 'SHA-256: ${updateInfo.apkChecksum!.substring(0, min(8, updateInfo.apkChecksum!.length))}…'
-                : null;
-
+          builder: (ctx, setDialogState) {
             return PopScope(
               canPop: !updateInfo.forceUpdate && !isDownloading,
               child: AlertDialog(
@@ -271,12 +598,17 @@ class UpdateService {
                   borderRadius: BorderRadius.circular(16),
                 ),
                 title: Row(
-                  children: const [
-                    Icon(Icons.system_update_rounded, color: Colors.indigo),
-                    SizedBox(width: 8),
+                  children: [
+                    Icon(
+                      isReady
+                          ? Icons.check_circle_rounded
+                          : Icons.system_update_rounded,
+                      color: isReady ? Colors.green : Colors.indigo,
+                    ),
+                    const SizedBox(width: 8),
                     Text(
-                      'Pembaruan Tersedia',
-                      style: TextStyle(
+                      isReady ? 'Pembaruan Siap' : 'Pembaruan Tersedia',
+                      style: const TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
                       ),
@@ -331,6 +663,34 @@ class UpdateService {
                         ),
                       ],
                       const SizedBox(height: 10),
+                      if (isReady) ...[
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Colors.green.shade50,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.green.shade200),
+                          ),
+                          child: Row(
+                            children: const [
+                              Icon(Icons.verified_rounded,
+                                  color: Colors.green, size: 20),
+                              SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'File update telah berhasil diunduh dan diverifikasi.',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.green,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                      ],
                       const Text(
                         'Catatan Perubahan:',
                         style: TextStyle(
@@ -353,7 +713,7 @@ class UpdateService {
                         ),
                       ),
 
-                      // Play Protect Notice (sesuai Buku Konter BG-VUE3)
+                      // Play Protect Notice
                       if (!noticeHidden) ...[
                         const SizedBox(height: 12),
                         Container(
@@ -406,8 +766,6 @@ class UpdateService {
                                         setDialogState(() {
                                           hideNoticeChecked = val ?? false;
                                         });
-                                        final prefs = testPrefs ??
-                                            await SharedPreferences.getInstance();
                                         await prefs.setBool(
                                           'hidePlayProtectNotice',
                                           hideNoticeChecked,
@@ -484,7 +842,29 @@ class UpdateService {
                         style: TextStyle(color: Colors.grey),
                       ),
                     ),
-                  if (!isDownloading)
+                  if (isReady)
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green.shade700,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      onPressed: () async {
+                        Navigator.pop(dialogContext);
+                        if (updateInfo.localApkPath != null) {
+                          await triggerInstall(
+                            updateInfo.localApkPath!,
+                            installer: installer,
+                          );
+                        }
+                      },
+                      child: const Text(
+                        'Pasang Sekarang',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                    )
+                  else if (!isDownloading)
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.indigo,

@@ -53,13 +53,29 @@ jobs:
           echo "Mendeteksi versi: v$VERSION_NAME (Build $VERSION_CODE)"
 
       - name: Validate Version Code Increase
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PREV_CODE=$(git show HEAD~1:version.json 2>/dev/null | jq -r '.version_code // 0' 2>/dev/null || echo "0")
-          if [ -z "$PREV_CODE" ] || [ "$PREV_CODE" = "null" ]; then
-            PREV_CODE=0
+          echo "Memeriksa kenaikan version_code terhadap rilis terakhir..."
+          PREV_CODE=0
+          LATEST_TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "")
+          if [ -n "$LATEST_TAG" ]; then
+            echo "Rilis GitHub terakhir ditemukan: $LATEST_TAG"
+            TAG_CODE=$(git show "$LATEST_TAG:pubspec.yaml" 2>/dev/null | grep '^version: ' | awk '{print $2}' | cut -d '+' -f 2 || echo "0")
+            if [ -n "$TAG_CODE" ] && [ "$TAG_CODE" -gt 0 ] 2>/dev/null; then
+              PREV_CODE=$TAG_CODE
+            else
+              JSON_CODE=$(git show "$LATEST_TAG:version.json" 2>/dev/null | jq -r '.version_code // 0' 2>/dev/null || echo "0")
+              if [ -n "$JSON_CODE" ] && [ "$JSON_CODE" -gt 0 ] 2>/dev/null; then
+                PREV_CODE=$JSON_CODE
+              fi
+            fi
+          else
+            echo "Tidak ada rilis sebelumnya di GitHub Releases. Melanjutkan rilis awal."
           fi
+
           echo "Version code sebelumnya: $PREV_CODE, Version code baru: $VERSION_CODE"
-          if [ "$VERSION_CODE" -le "$PREV_CODE" ]; then
+          if [ "$PREV_CODE" -gt 0 ] && [ "$VERSION_CODE" -le "$PREV_CODE" ]; then
             echo "::error::version_code ($VERSION_CODE) harus lebih besar dari rilis sebelumnya ($PREV_CODE)!"
             exit 1
           fi
